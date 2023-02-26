@@ -17,6 +17,8 @@ import torch.nn.functional as F
 from promptsource.templates import DatasetTemplates
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForMaskedLM, AutoModelForCausalLM
 from datasets import load_dataset
+from operator import itemgetter
+from datasets import Dataset
 
 
 ############# Model loading and result saving #############
@@ -182,7 +184,6 @@ class ContrastDataset(Dataset):
         """
         # get question and answer from prompt
         question, answer = nl_prompt
-        
         # tokenize the question and answer (depending upon the model type and whether self.use_decoder is True)
         if self.model_type == "encoder_decoder":
             input_ids = self.get_encoder_decoder_input_ids(question, answer)
@@ -283,8 +284,26 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
     # load the raw dataset
     raw_dataset = load_dataset(dataset_name)[split]
 
+    if dataset_name == "yelp_review_full":
+        og_labels = raw_dataset['label']
+        og_text = raw_dataset['text']
+        five_star_indices = [i for i, value in enumerate(og_labels) if value == 4]
+        one_star_indices = [i for i, value in enumerate(og_labels) if value == 0]
+        five_star_text = list(itemgetter(*five_star_indices)(og_text))
+        one_star_text = list(itemgetter(*one_star_indices)(og_text))
+        filtered_labels = [1] * len(five_star_text) + [0] * len(one_star_text)
+        filtered_text = five_star_text + one_star_text
+        new_df = pd.DataFrame({
+            "label" : filtered_labels,
+            "text" : filtered_text
+        })
+        raw_dataset = Dataset.from_pandas(new_df)
+
     # load all the prompts for that dataset
     all_prompts = DatasetTemplates(dataset_name)
+
+    if dataset_name == "yelp_review_full":
+        all_prompts = DatasetTemplates('imdb')
 
     # create the ConstrastDataset
     contrast_dataset = ContrastDataset(raw_dataset, tokenizer, all_prompts, prompt_idx, 
