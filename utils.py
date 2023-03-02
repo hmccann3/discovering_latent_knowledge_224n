@@ -59,6 +59,7 @@ def get_parser():
     parser.add_argument("--token_idx", type=int, default=-1, help="Which token to use (by default the last token)")
     # saving the hidden states
     parser.add_argument("--save_dir", type=str, default="generated_hidden_states", help="Directory to save the hidden states")
+    parser.add_argument("--use_more_ratings", action="store_true", help="When using the Yelp dataset, use additional 2 and 4 star ratings")
 
     return parser
 
@@ -88,7 +89,7 @@ def load_model(model_name, cache_dir=None, parallelize=False, device="cuda"):
     
         
     # specify model_max_length (the max token length) to be 512 to ensure that padding works 
-    # (it's not set by default for e.g. DeBERTa, but it's necessary for padding to work properly)
+    # (it's not set by gefault for e.g. DeBERTa, but it's necessary for padding to work properly)
     tokenizer = AutoTokenizer.from_pretrained(full_model_name, cache_dir=cache_dir, model_max_length=512)
     model.eval()
 
@@ -275,7 +276,8 @@ class ContrastDataset(Dataset):
 
     
 def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, num_examples=1000,
-                   model_type="encoder_decoder", use_decoder=False, device="cuda", pin_memory=True, num_workers=1):
+                   model_type="encoder_decoder", use_decoder=False, device="cuda", pin_memory=True, num_workers=1,
+                   more_ratings=False):
     """
     Creates a dataloader for a given dataset (and its split), tokenizer, and prompt index
 
@@ -287,12 +289,15 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
     if dataset_name == "yelp_review_full":
         og_labels = raw_dataset['label']
         og_text = raw_dataset['text']
-        five_star_indices = [i for i, value in enumerate(og_labels) if value == 4]
-        one_star_indices = [i for i, value in enumerate(og_labels) if value == 0]
-        five_star_text = list(itemgetter(*five_star_indices)(og_text))
-        one_star_text = list(itemgetter(*one_star_indices)(og_text))
-        filtered_labels = [1] * len(five_star_text) + [0] * len(one_star_text)
-        filtered_text = five_star_text + one_star_text
+        filtered_text, filtered_labels = [], []
+        neg_ratings = [0, 1]
+        considered_ratings = [0, 1, 3, 4] if more_ratings else [0, 4]
+        for rating in considered_ratings:
+            star_indices = [idx for idx, label in enumerate(og_labels) if label == rating]
+            star_text = list(itemgetter(*star_indices)(og_text))
+            filtered_labels.extend([0] * len(star_text) if rating in neg_ratings else [1] * len(star_text))
+            filtered_text.extend(star_text)
+        print(f'Found {len(filtered_labels)} examples from Yelp Dataset')
         new_df = pd.DataFrame({
             "label" : filtered_labels,
             "text" : filtered_text
@@ -391,7 +396,7 @@ def get_individual_hidden_states(model, batch_ids, layer=None, all_layers=True, 
         # first we need to get the first mask location for each example in the batch
         assert token_idx < 0, print("token_idx must be either 0 or negative, but got", token_idx)
         mask = batch_ids["decoder_attention_mask"] if (model_type == "encoder_decoder" and use_decoder) else batch_ids["attention_mask"]
-        first_mask_loc = get_first_mask_loc(mask).squeeze()
+        first_mask_loc = get_first_mask_loc(mask).squeeze().cpu()
         final_hs = hs[torch.arange(hs.size(0)), first_mask_loc+token_idx]  # (bs, dim, num_layers)
     
     return final_hs
