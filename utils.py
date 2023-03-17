@@ -250,7 +250,7 @@ class ContrastDataset(Dataset):
         # get the original example
         data = self.raw_dataset[int(index)]
         #if 'text'in data:
-        print(data)
+        #print(data)
         text, true_answer = data["text"], data["label"]
         #elif 'content' in data:
         #    text, true_answer = data["content"], data["label"]

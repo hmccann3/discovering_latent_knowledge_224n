@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.calibration import calibration_curve
 import matplotlib.lines as line
 import matplotlib.pyplot as plt
-
+from sklearn.metrics import brier_score_loss
 
 from sklearn.calibration import CalibratedClassifierCV as cccv
 
@@ -61,7 +61,8 @@ def main(args, generation_args):
         uncali_x, uncali_y = calibration_curve(y_test, y_preds_neg.flatten(), n_bins=10)
     # Assume that the first point should be less than the last point when plotting
     print(f"CCS uncalibrated accuracy: {ccs_acc}")
-
+    print("Brier uncalibrated")
+    print(brier_score_loss(y_test, y_preds_pos.flatten()))
     X = np.stack([cali_pos_hs_train, cali_neg_hs_train], axis=0).transpose(1, 0, 2)
     y = cali_y_train
 
@@ -87,6 +88,8 @@ def main(args, generation_args):
         if cali_x[0] > cali_x[-1] or cali_y[0] > cali_y[-1]:
             print('Flipping calibrated graph')
             cali_x, cali_y = calibration_curve(y_test, y_preds[:,0].flatten(), n_bins=10)
+        print("Brier calibrated")
+        print(brier_score_loss(y_test, y_preds[:,1].flatten()))
     print(f"CCS calibrated accuracy: {ccs_acc}")
 
 
@@ -112,10 +115,10 @@ if __name__ == "__main__":
     parser.add_argument("--ccs_batch_size", type=int, default=-1)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--ccs_device", type=str, default="cuda")
-    parser.add_argument("--linear", action="store_true")
+    parser.add_argument("--linear", type=bool, default=True)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--var_normalize", action="store_true")
-    parser.add_argument("--calibration_type", type=str, default="bce")
+    parser.add_argument("--calibration_type", type=str, default="isotonic")
     args = parser.parse_args()
     args.calibration_dataset_name = cdn
     main(args, generation_args)
