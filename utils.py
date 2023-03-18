@@ -152,10 +152,11 @@ class ContrastDataset(Dataset):
     Truncates examples larger than max_len, which can mess up contrast pairs, so make sure to only give it examples that won't be truncated.
     """
     def __init__(self, raw_dataset, tokenizer, all_prompts, prompt_idx,
-                 model_type="encoder_decoder", use_decoder=False, device="cuda"):
+                 model_type="encoder_decoder", use_decoder=False, device="cuda", dataset_name):
 
         # data and tokenizer
         self.raw_dataset = raw_dataset
+        self.dataset_name = dataset_name
         self.tokenizer = tokenizer
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -248,34 +249,42 @@ class ContrastDataset(Dataset):
 
     def __getitem__(self, index):
         # get the original example
+        
         data = self.raw_dataset[int(index)]
-        #if 'text'in data:
-        #print(data)
-        text, true_answer = data["text"], data["label"]
-        #elif 'content' in data:
-        #    text, true_answer = data["content"], data["label"]
-
-        # get the possible labels
-        # (for simplicity assume the binary case for contrast pairs)
-        label_list = self.prompt.get_answer_choices_list(data)
-        assert len(label_list) == 2, print("Make sure there are only two possible answers! Actual number of answers:", label_list)
-
-        # reconvert to dataset format but with fake/candidate labels to create the contrast pair
-        neg_example = {"text": text, "label": 0}
-        pos_example = {"text": text, "label": 1}
-
-        # construct contrast pairs by answering the prompt with the two different possible labels
-        # (for example, label 0 might be mapped to "no" and label 1 might be mapped to "yes")
-        neg_prompt, pos_prompt = self.prompt.apply(neg_example), self.prompt.apply(pos_example)
-
-        # tokenize
-        neg_ids, pos_ids = self.encode(neg_prompt), self.encode(pos_prompt)
-
-        # verify these are different (e.g. tokenization didn't cut off the difference between them)
-        if self.use_decoder and self.model_type == "encoder_decoder":
-            assert (neg_ids["decoder_input_ids"] - pos_ids["decoder_input_ids"]).sum() != 0, print("The decoder_input_ids for the contrast pairs are the same!", neg_ids, pos_ids)
+        if self.dataset_name == "boolq_tough":
+            neg_prompt = data["Option 0"]
+            pos_prompt = data["Option 1"]
+            neg_ids, pos_ids = self.encode(neg_prompt), self.encode(pos_prompt)
+            true_answer = data["Correct answer"]
+            return neg_ids, pos_ids, neg_prompt, pos_prompt, true_answer
         else:
-            assert (neg_ids["input_ids"] - pos_ids["input_ids"]).sum() != 0, print("The input_ids for the contrast pairs are the same!", neg_ids, pos_ids)
+            #if 'text'in data:
+            #print(data)
+            text, true_answer = data["text"], data["label"]
+            #elif 'content' in data:
+            #    text, true_answer = data["content"], data["label"]
+
+            # get the possible labels
+            # (for simplicity assume the binary case for contrast pairs)
+            label_list = self.prompt.get_answer_choices_list(data)
+            assert len(label_list) == 2, print("Make sure there are only two possible answers! Actual number of answers:", label_list)
+
+            # reconvert to dataset format but with fake/candidate labels to create the contrast pair
+            neg_example = {"text": text, "label": 0}
+            pos_example = {"text": text, "label": 1}
+
+            # construct contrast pairs by answering the prompt with the two different possible labels
+            # (for example, label 0 might be mapped to "no" and label 1 might be mapped to "yes")
+            neg_prompt, pos_prompt = self.prompt.apply(neg_example), self.prompt.apply(pos_example)
+
+            # tokenize
+            neg_ids, pos_ids = self.encode(neg_prompt), self.encode(pos_prompt)
+
+            # verify these are different (e.g. tokenization didn't cut off the difference between them)
+            if self.use_decoder and self.model_type == "encoder_decoder":
+                assert (neg_ids["decoder_input_ids"] - pos_ids["decoder_input_ids"]).sum() != 0, print("The decoder_input_ids for the contrast pairs are the same!", neg_ids, pos_ids)
+            else:
+                assert (neg_ids["input_ids"] - pos_ids["input_ids"]).sum() != 0, print("The input_ids for the contrast pairs are the same!", neg_ids, pos_ids)
 
         # return the tokenized inputs, the text prompts, and the true label
         return neg_ids, pos_ids, neg_prompt, pos_prompt, true_answer
@@ -319,7 +328,7 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
     # create the ConstrastDataset
     contrast_dataset = ContrastDataset(raw_dataset, tokenizer, all_prompts, prompt_idx,
                                        model_type=model_type, use_decoder=use_decoder,
-                                       device=device)
+                                       device=device, dataset_name=dataset_name)
 
     # get a random permutation of the indices; we'll take the first num_examples of these that do not get truncated
     random_idxs = np.random.permutation(len(contrast_dataset))
