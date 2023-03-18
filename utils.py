@@ -152,7 +152,7 @@ class ContrastDataset(Dataset):
     Truncates examples larger than max_len, which can mess up contrast pairs, so make sure to only give it examples that won't be truncated.
     """
     def __init__(self, raw_dataset, tokenizer, all_prompts, prompt_idx,
-                 model_type="encoder_decoder", use_decoder=False, device="cuda", dataset_name):
+                 model_type="encoder_decoder", use_decoder=False, device="cuda", dataset_name="imdb"):
 
         # data and tokenizer
         self.raw_dataset = raw_dataset
@@ -254,7 +254,9 @@ class ContrastDataset(Dataset):
         if self.dataset_name == "boolq_tough":
             neg_prompt = data["Option 0"]
             pos_prompt = data["Option 1"]
-            neg_ids, pos_ids = self.encode(neg_prompt), self.encode(pos_prompt)
+            neg_ids = self.tokenizer(neg_prompt, truncation=True, padding="max_length", return_tensors="pt")
+            pos_ids = self.tokenizer(pos_prompt, truncation=True, padding="max_length", return_tensors="pt")
+            #neg_ids, pos_ids = self.encode(neg_prompt), self.encode(pos_prompt)
             true_answer = data["Correct answer"]
             return neg_ids, pos_ids, neg_prompt, pos_prompt, true_answer
         else:
@@ -327,7 +329,8 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
             all_prompts = DatasetTemplates('imdb')
     else:
         data_files = {"train": "wrong_zero_shot_boolq.csv"}
-        raw_dataset = load_dataset('csv', data_files=data_files)
+        raw_dataset = load_dataset('csv', data_files=data_files)["train"]
+        all_prompts = DatasetTemplates('imdb')
     # create the ConstrastDataset
     contrast_dataset = ContrastDataset(raw_dataset, tokenizer, all_prompts, prompt_idx,
                                        model_type=model_type, use_decoder=use_decoder,
@@ -351,7 +354,8 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
         # create and return the corresponding dataloader
         subset_dataset = torch.utils.data.Subset(contrast_dataset, keep_idxs)
     else:
-        subset_dataset = contrast_dataset
+        keep_idxs = list(range(0,1000))
+        subset_dataset = torch.utils.data.Subset(contrast_dataset, keep_idxs)
     dataloader = DataLoader(subset_dataset, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=num_workers)
 
     return dataloader
