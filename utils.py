@@ -332,24 +332,26 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
     contrast_dataset = ContrastDataset(raw_dataset, tokenizer, all_prompts, prompt_idx,
                                        model_type=model_type, use_decoder=use_decoder,
                                        device=device, dataset_name=dataset_name)
+    if dataset_name != 'boolq_tough':
+        # get a random permutation of the indices; we'll take the first num_examples of these that do not get truncated
+        random_idxs = np.random.permutation(len(contrast_dataset))
 
-    # get a random permutation of the indices; we'll take the first num_examples of these that do not get truncated
-    random_idxs = np.random.permutation(len(contrast_dataset))
+        # remove examples that would be truncated (since this messes up contrast pairs)
+        prompt_name_list = list(all_prompts.name_to_id_mapping.keys())
+        prompt = all_prompts[prompt_name_list[prompt_idx]]
+        keep_idxs = []
+        for idx in random_idxs:
+            question, answer = prompt.apply(raw_dataset[int(idx)])
+            input_text = question + " " + answer
+            if len(tokenizer.encode(input_text, truncation=False)) < tokenizer.model_max_length - 2:  # include small margin to be conservative
+                keep_idxs.append(idx)
+                if len(keep_idxs) >= num_examples:
+                    break
 
-    # remove examples that would be truncated (since this messes up contrast pairs)
-    prompt_name_list = list(all_prompts.name_to_id_mapping.keys())
-    prompt = all_prompts[prompt_name_list[prompt_idx]]
-    keep_idxs = []
-    for idx in random_idxs:
-        question, answer = prompt.apply(raw_dataset[int(idx)])
-        input_text = question + " " + answer
-        if len(tokenizer.encode(input_text, truncation=False)) < tokenizer.model_max_length - 2:  # include small margin to be conservative
-            keep_idxs.append(idx)
-            if len(keep_idxs) >= num_examples:
-                break
-
-    # create and return the corresponding dataloader
-    subset_dataset = torch.utils.data.Subset(contrast_dataset, keep_idxs)
+        # create and return the corresponding dataloader
+        subset_dataset = torch.utils.data.Subset(contrast_dataset, keep_idxs)
+    else:
+        subset_dataset = contrast_dataset
     dataloader = DataLoader(subset_dataset, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=num_workers)
 
     return dataloader
