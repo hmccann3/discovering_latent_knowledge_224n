@@ -299,32 +299,35 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
     Takes a random subset of (at most) num_examples samples from the dataset that are not truncated by the tokenizer.
     """
     # load the raw dataset
-    raw_dataset = load_dataset(dataset_name)[split]
+    if dataset_name != 'boolq_tough':
+        raw_dataset = load_dataset(dataset_name)[split]
 
-    if dataset_name == "yelp_review_full":
-        og_labels = raw_dataset['label']
-        og_text = raw_dataset['text']
-        filtered_text, filtered_labels = [], []
-        neg_ratings = [0, 1]
-        considered_ratings = [0, 1, 3, 4] if more_ratings else [0, 4]
-        for rating in considered_ratings:
-            star_indices = [idx for idx, label in enumerate(og_labels) if label == rating]
-            star_text = list(itemgetter(*star_indices)(og_text))
-            filtered_labels.extend([0] * len(star_text) if rating in neg_ratings else [1] * len(star_text))
-            filtered_text.extend(star_text)
-        print(f'Found {len(filtered_labels)} examples from Yelp Dataset')
-        new_df = pd.DataFrame({
-            "label" : filtered_labels,
-            "text" : filtered_text
-        })
-        raw_dataset = Dataset.from_pandas(new_df)
+        if dataset_name == "yelp_review_full":
+            og_labels = raw_dataset['label']
+            og_text = raw_dataset['text']
+            filtered_text, filtered_labels = [], []
+            neg_ratings = [0, 1]
+            considered_ratings = [0, 1, 3, 4] if more_ratings else [0, 4]
+            for rating in considered_ratings:
+                star_indices = [idx for idx, label in enumerate(og_labels) if label == rating]
+                star_text = list(itemgetter(*star_indices)(og_text))
+                filtered_labels.extend([0] * len(star_text) if rating in neg_ratings else [1] * len(star_text))
+                filtered_text.extend(star_text)
+            print(f'Found {len(filtered_labels)} examples from Yelp Dataset')
+            new_df = pd.DataFrame({
+                "label" : filtered_labels,
+                "text" : filtered_text
+            })
+            raw_dataset = Dataset.from_pandas(new_df)
 
-    # load all the prompts for that dataset
-    all_prompts = DatasetTemplates(dataset_name)
+        # load all the prompts for that dataset
+        all_prompts = DatasetTemplates(dataset_name)
 
-    if dataset_name == "yelp_review_full":
-        all_prompts = DatasetTemplates('imdb')
-
+        if dataset_name == "yelp_review_full":
+            all_prompts = DatasetTemplates('imdb')
+    else:
+        data_files = {"train": "wrong_zero_shot_boolq.csv"}
+        raw_dataset = load_dataset('csv', data_files=data_files)
     # create the ConstrastDataset
     contrast_dataset = ContrastDataset(raw_dataset, tokenizer, all_prompts, prompt_idx,
                                        model_type=model_type, use_decoder=use_decoder,
