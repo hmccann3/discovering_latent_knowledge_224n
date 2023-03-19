@@ -2,6 +2,7 @@ import os
 import functools
 import argparse
 import copy
+import random
 
 import numpy as np
 import pandas as pd
@@ -16,10 +17,13 @@ import torch.nn.functional as F
 
 # make sure to install promptsource, transformers, and datasets!
 from promptsource.templates import DatasetTemplates
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForMaskedLM, AutoModelForCausalLM
+from transformers import AutoConfig, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForMaskedLM, AutoModelForCausalLM
 from datasets import load_dataset
 from operator import itemgetter
 from datasets import Dataset
+
+
+random.seed(42)
 
 
 ############# Model loading and result saving #############
@@ -43,7 +47,7 @@ def get_parser():
     """
     parser = argparse.ArgumentParser()
     # setting up model
-    parser.add_argument("--model_name", type=str, default="T5", help="Name of the model to use")
+    parser.add_argument("--model_name", type=str, default="t5", help="name of the model to use")
     parser.add_argument("--cache_dir", type=str, default=None, help="Cache directory for the model and tokenizer")
     parser.add_argument("--parallelize", action="store_true", help="Whether to parallelize the model")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use for the model")
@@ -61,12 +65,13 @@ def get_parser():
     parser.add_argument("--token_idx", type=int, default=-1, help="Which token to use (by default the last token)")
     # saving the hidden states
     parser.add_argument("--save_dir", type=str, default="generated_hidden_states", help="Directory to save the hidden states")
+    parser.add_argument("--random_init", action="store_true", help="Whether to use random weights for model init rather than pretrained weights")
     parser.add_argument("--use_more_ratings", action="store_true", help="When using the Yelp dataset, use additional 2 and 4 star ratings")
 
     return parser
 
 
-def load_model(model_name, cache_dir=None, parallelize=False, device="cuda"):
+def load_model(model_name, cache_dir=None, parallelize=False, device="cuda", random_init=False):
     """
     Loads a model and its corresponding tokenizer, either parallelized across GPUs (if the model permits that; usually just use this for T5-based models) or on a single GPU
     """
@@ -77,17 +82,25 @@ def load_model(model_name, cache_dir=None, parallelize=False, device="cuda"):
         # if you're trying a new model, make sure it's the full name
         full_model_name = model_name
 
-    # use the right automodel, and get the corresponding model type
-    try:
-        model = AutoModelForSeq2SeqLM.from_pretrained(full_model_name, cache_dir=cache_dir)
-        model_type = "encoder_decoder"
-    except:
+    # Load a non-pretrained version when desired
+    if random_init:
+        print("Loading random init model")
+        # https://github.com/huggingface/transformers/issues/4685#issuecomment-636306895
+        model = AutoModel.from_config(AutoConfig.from_pretrained(full_model_name))
+
+    else:
+        print("Loading model with pretrained weights")
+        # use the right automodel, and get the corresponding model type
         try:
-            model = AutoModelForMaskedLM.from_pretrained(full_model_name, cache_dir=cache_dir)
-            model_type = "encoder"
+            model = AutoModelForSeq2SeqLM.from_pretrained(full_model_name, cache_dir=cache_dir)
+            model_type = "encoder_decoder"
         except:
-            model = AutoModelForCausalLM.from_pretrained(full_model_name, cache_dir=cache_dir)
-            model_type = "decoder"
+            try:
+                model = AutoModelForMaskedLM.from_pretrained(full_model_name, cache_dir=cache_dir)
+                model_type = "encoder"
+            except:
+                model = AutoModelForCausalLM.from_pretrained(full_model_name, cache_dir=cache_dir)
+                model_type = "decoder"
 
 
     # specify model_max_length (the max token length) to be 512 to ensure that padding works
@@ -151,11 +164,12 @@ class ContrastDataset(Dataset):
 
     Truncates examples larger than max_len, which can mess up contrast pairs, so make sure to only give it examples that won't be truncated.
     """
-    def __init__(self, raw_dataset, tokenizer, all_prompts, prompt_idx,
+    def __init__(self, raw_dataset, dataset_name, tokenizer, all_prompts, prompt_idx,
                  model_type="encoder_decoder", use_decoder=False, device="cuda"):
 
         # data and tokenizer
         self.raw_dataset = raw_dataset
+        self.dataset_name = dataset_name
         self.tokenizer = tokenizer
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -168,8 +182,13 @@ class ContrastDataset(Dataset):
             assert self.model_type != "encoder"
 
         # prompt
-        prompt_name_list = list(all_prompts.name_to_id_mapping.keys())
-        self.prompt = all_prompts[prompt_name_list[prompt_idx]]
+        self.prompt_checking = True # determines whether you should apply prompt checking before truncation
+        if dataset_name in ['boolq', 'dbpedia_14']:
+            self.prompt_checking = False
+
+        if dataset_name not in ['boolq']:
+            prompt_name_list = list(all_prompts.name_to_id_mapping.keys())
+            self.prompt = all_prompts[prompt_name_list[prompt_idx]]
 
     def __len__(self):
         return len(self.raw_dataset)
@@ -249,24 +268,89 @@ class ContrastDataset(Dataset):
     def __getitem__(self, index):
         # get the original example
         data = self.raw_dataset[int(index)]
-        #if 'text'in data:
-        print(data)
-        text, true_answer = data["text"], data["label"]
-        #elif 'content' in data:
-        #    text, true_answer = data["content"], data["label"]
 
-        # get the possible labels
-        # (for simplicity assume the binary case for contrast pairs)
-        label_list = self.prompt.get_answer_choices_list(data)
-        assert len(label_list) == 2, print("Make sure there are only two possible answers! Actual number of answers:", label_list)
+        # For multi-class classification, randomly select an untrue example
+        if self.dataset_name in ['dbpedia_14']:
+            text, true_answer_idx = data["content"], data["label"]
+            label_list = self.prompt.get_answer_choices_list(data)
+
+            # Binary prompt
+            """
+            decis = random.choice([True, False])
+            if decis:
+                # Put in the true category
+                category = label_list[true_answer_idx].lower()
+                true_answer = 1
+            else:
+                # Randomly select another category
+                label_list_true_ans_removed = [x for idx, x in enumerate(label_list) if idx != true_answer_idx]
+                category = random.choice(label_list_true_ans_removed).lower()
+                true_answer = 0
+
+            prompt = f"Given a list of categories: company, educational institution, artist, athlete, office holder, mean of transportation, building, natural place, village, animal, plant, album, film or written work, this text - {text} - belongs to the category {category}"
+
+            neg_prompt = [prompt, "false"]
+            pos_prompt = [prompt, "true"]
+            """
+
+            # Dual prompt
+            true_category = label_list[true_answer_idx]
+            label_list_true_ans_removed = [x for idx, x in enumerate(label_list) if idx != true_answer_idx]
+            false_category = random.choice(label_list_true_ans_removed)
+            if random.choice([True, False]):
+                label0 = true_category
+                label1 = false_category
+                true_answer = 0
+            else:
+                label1 = true_category
+                label0 = false_category
+                true_answer = 1
+
+            prompt = f"Consider the following example: “‘ {text} ”’ Choice 1: {label0}. Choice 2: {label1}.Between choice 1 and choice 2, what is the topic of this example?"
+            neg_prompt = [prompt, "choice 1"]
+            pos_prompt = [prompt, "choice 2"] 
+
+        elif self.dataset_name in ['boolq']:
+            passage, question, answer = data["passage"], data["question"], data["answer"]
+
+            prompt = f"Given the following passage - {passage} - {question}?"
+            neg_prompt = [prompt, "false"]
+            pos_prompt = [prompt, "true"]
+
+            if answer:
+                true_answer = 1
+            else:
+                true_answer = 0
+
+        # For binary-class classification
+        elif self.dataset_name in ['imdb', 'yelp_review_full']:
+            text, true_answer = data["text"], data["label"]
+            label_list = self.prompt.get_answer_choices_list(data)
+            assert len(label_list) == 2, print("Make sure there are only two possible answers! Actual number of answers:", label_list)
+            neg_example = {"text": text, "label": 0}
+            pos_example = {"text": text, "label": 1}
+
+            neg_prompt, pos_prompt = self.prompt.apply(neg_example), self.prompt.apply(pos_example)
+
+        else:
+            assert False, print("This dataset has not been given a fixed labeling method yet")
+            
+
+        #label_list = self.prompt.get_answer_choices_list(data)
+        #print(label_list)
+        #assert len(label_list) == 2, print("Make sure there are only two possible answers! Actual number of answers:", label_list)
 
         # reconvert to dataset format but with fake/candidate labels to create the contrast pair
-        neg_example = {"text": text, "label": 0}
-        pos_example = {"text": text, "label": 1}
+        #neg_example = {"text": text, "label": 0}
+        #pos_example = {"text": text, "label": 1}
 
         # construct contrast pairs by answering the prompt with the two different possible labels
         # (for example, label 0 might be mapped to "no" and label 1 might be mapped to "yes")
-        neg_prompt, pos_prompt = self.prompt.apply(neg_example), self.prompt.apply(pos_example)
+        #neg_prompt, pos_prompt = self.prompt.apply(neg_example), self.prompt.apply(pos_example)
+        #print(neg_prompt)
+        #print(pos_prompt)
+        #print(true_answer)
+        #print('------------------------------------------------')
 
         # tokenize
         neg_ids, pos_ids = self.encode(neg_prompt), self.encode(pos_prompt)
@@ -312,12 +396,13 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
 
     # load all the prompts for that dataset
     all_prompts = DatasetTemplates(dataset_name)
+    print(all_prompts)
 
     if dataset_name == "yelp_review_full":
         all_prompts = DatasetTemplates('imdb')
 
     # create the ConstrastDataset
-    contrast_dataset = ContrastDataset(raw_dataset, tokenizer, all_prompts, prompt_idx,
+    contrast_dataset = ContrastDataset(raw_dataset, dataset_name, tokenizer, all_prompts, prompt_idx,
                                        model_type=model_type, use_decoder=use_decoder,
                                        device=device)
 
@@ -325,21 +410,39 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
     random_idxs = np.random.permutation(len(contrast_dataset))
 
     # remove examples that would be truncated (since this messes up contrast pairs)
-    prompt_name_list = list(all_prompts.name_to_id_mapping.keys())
-    prompt = all_prompts[prompt_name_list[prompt_idx]]
-    keep_idxs = []
-    for idx in random_idxs:
-        question, answer = prompt.apply(raw_dataset[int(idx)])
-        input_text = question + " " + answer
-        if len(tokenizer.encode(input_text, truncation=False)) < tokenizer.model_max_length - 2:  # include small margin to be conservative
-            keep_idxs.append(idx)
-            if len(keep_idxs) >= num_examples:
-                break
+    if contrast_dataset.prompt_checking:
+        print("Using prompt checking")
+        prompt_name_list = list(all_prompts.name_to_id_mapping.keys())
+        prompt = all_prompts[prompt_name_list[prompt_idx]]
+
+        keep_idxs = []
+        for idx in random_idxs:
+            question, answer = prompt.apply(raw_dataset[int(idx)])
+            input_text = question + " " + answer
+            if len(tokenizer.encode(input_text, truncation=False)) < tokenizer.model_max_length - 2:  # include small margin to be conservative
+                keep_idxs.append(idx)
+                if len(keep_idxs) >= num_examples:
+                    break
+    else:
+        print("Using skipping prompt checking")
+        keep_idxs = []
+        for idx in random_idxs:
+            try:
+                _, _, neg_prompt, pos_prompt, true_answer = contrast_dataset[int(idx)]
+            except AssertionError:
+                # This happens if the text is too long, so just skip the index
+                continue
+            input_text = pos_prompt[0] + " " + pos_prompt[1]
+            if len(tokenizer.encode(input_text, truncation=False)) < tokenizer.model_max_length - 2:  # include small margin to be conservative
+                keep_idxs.append(idx)
+                if len(keep_idxs) >= num_examples:
+                    break
 
     # create and return the corresponding dataloader
     subset_dataset = torch.utils.data.Subset(contrast_dataset, keep_idxs)
     dataloader = DataLoader(subset_dataset, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=num_workers)
 
+    print(next(iter(dataloader)))
     return dataloader
 
 
@@ -443,19 +546,34 @@ def get_all_hidden_states(model, dataloader, layer=None, all_layers=True, token_
 
 ############# CCS #############
 class MLPProbe(nn.Module):
-    def __init__(self, d):
+    def __init__(self, d, use_dropout, use_dropout_loss, dropout_factor):
         super().__init__()
+        self.use_dropout = use_dropout
+        self.use_dropout_loss = use_dropout_loss
+        self.dropout = nn.Dropout(dropout_factor)
         self.linear1 = nn.Linear(d, 100)
         self.linear2 = nn.Linear(100, 1)
 
-    def forward(self, x):
-        h = F.relu(self.linear1(x))
-        o = self.linear2(h)
+    def forward(self, x, apply_dropout=False):
+        if self.use_dropout:
+            h = F.relu(self.linear1(self.dropout(x)))
+            o = self.linear2(self.dropout(h))
+        elif not self.use_dropout and self.use_dropout_loss:
+            if apply_dropout:
+                h = F.relu(self.linear1(self.dropout(x)))
+                o = self.linear2(self.dropout(h))
+            else:
+                h = F.relu(self.linear1(x))
+                o = self.linear2(h)
+        else:
+            h = F.relu(self.linear1(x))
+            o = self.linear2(h)
         return torch.sigmoid(o)
 
 class CCS(sklearn.base.BaseEstimator):
     def __init__(self, x0, x1, nepochs=1000, ntries=10, lr=1e-3, batch_size=-1,
-                 verbose=False, device="cuda", linear=True, weight_decay=0.01, var_normalize=False):
+                 verbose=False, device="cuda", linear=True, weight_decay=0.01, var_normalize=False,
+                 use_dropout=False, use_dropout_loss=False, dropout_loss_weight=0.2, dropout_factor=0.1):
         # data
         self.var_normalize = var_normalize
         self.x0 = x0
@@ -469,6 +587,10 @@ class CCS(sklearn.base.BaseEstimator):
         self.device = device
         self.batch_size = batch_size
         self.weight_decay = weight_decay
+        self.use_dropout = use_dropout      # Applies to using dropout during forward pass
+        self.use_dropout_loss = use_dropout_loss
+        self.dropout_loss_weight = dropout_loss_weight
+        self.dropout_factor = dropout_factor
 
         # probe
         self.linear = linear
@@ -478,9 +600,13 @@ class CCS(sklearn.base.BaseEstimator):
 
     def initialize_probe(self):
         if self.linear:
+            print("Linear probe")
+            if self.use_dropout or self.use_dropout_loss:
+                self.dropout = nn.Dropout(self.dropout_factor)
             self.probe = nn.Sequential(nn.Linear(self.d, 1), nn.Sigmoid())
         else:
-            self.probe = MLPProbe(self.d)
+            print("MLP probe")
+            self.probe = MLPProbe(self.d, self.use_dropout, self.use_dropout_loss, self.dropout_factor)
         self.probe.to(self.device)
 
 
@@ -556,10 +682,34 @@ class CCS(sklearn.base.BaseEstimator):
                 x1_batch = x1[j*batch_size:(j+1)*batch_size]
 
                 # probe
+                if self.use_dropout_loss:
+                    # Run multiple times
+                    p_0_running = []
+                    p_1_running = []
+                    for _ in range(10):
+                        with torch.no_grad():
+                            if self.linear:
+                                p0, p1 = self.probe(self.dropout(x0_batch)), self.probe(self.dropout(x1_batch))
+                            else:
+                                p0, p1 = self.probe(x0_batch, apply_dropout=True), self.probe(x1_batch, apply_dropout=True)
+
+                            p_0_running.append(p0)
+                            p_1_running.append(p1)
+                    avg_var = (torch.var(torch.stack(p_0_running, dim=0)) + torch.var(torch.stack(p_1_running, dim=0))) / 2
+
+                            # Want to penalize high variance across samples, which equates to 
+                        
+                if self.use_dropout:
+                    if self.linear:
+                        x0_batch, x1_batch = self.dropout(x0_batch), self.dropout(x1_batch)
                 p0, p1 = self.probe(x0_batch), self.probe(x1_batch)
 
+
                 # get the corresponding loss
-                loss = self.get_loss(p0, p1)
+                if self.use_dropout_loss:
+                    loss = self.get_loss(p0, p1) + self.dropout_loss_weight * avg_var
+                else:
+                    loss = self.get_loss(p0, p1)
 
                 # update the parameters
                 optimizer.zero_grad()
@@ -573,14 +723,14 @@ class CCS(sklearn.base.BaseEstimator):
         self.x0 = self.normalize(self.x0)
         self.x1 = self.normalize(self.x1)
         self.d = self.x0.shape[-1]
-        self.probe = self.initialize_probe()
+        self.initialize_probe()
         self.best_probe = copy.deepcopy(self.probe)
         self.calibration_loss = nn.BCELoss()
         self.is_fitted = False
 
         best_loss = np.inf
         for train_num in range(self.ntries):
-            self.initialize_probe()
+            #self.initialize_probe()
             loss = self.train()
             if loss < best_loss:
                 self.best_probe = copy.deepcopy(self.probe)
@@ -648,13 +798,13 @@ class CCS(sklearn.base.BaseEstimator):
             self.x0 = self.normalize(self.x0)
             self.x1 = self.normalize(self.x1)
             self.d = self.x0.shape[-1]
-            self.probe = self.initialize_probe()
+            self.initialize_probe()
             self.best_probe = copy.deepcopy(self.probe)
             self.calibration_loss = nn.BCELoss()
 
         best_loss = np.inf
         for train_num in range(self.ntries):
-            self.initialize_probe()
+            #self.initialize_probe()
             loss = self._calibrated_train(X, y)
             if loss < best_loss:
                 self.best_probe = copy.deepcopy(self.probe)
@@ -686,9 +836,4 @@ class CCS(sklearn.base.BaseEstimator):
             avg_confidence = np.concatenate((avg_pos_confidence, avg_neg_confidence), axis=1)
             all_predictions.append(avg_confidence)
         return np.concatenate(all_predictions, axis=0)
-
-
-
-
-
 

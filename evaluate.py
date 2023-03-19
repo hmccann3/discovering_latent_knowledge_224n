@@ -3,6 +3,7 @@ from utils import get_parser, load_all_generations, CCS
 import numpy as np
 
 from sklearn.calibration import calibration_curve
+from sklearn.metrics import brier_score_loss
 import matplotlib.lines as line
 import matplotlib.pyplot as plt
 
@@ -11,7 +12,11 @@ from sklearn.calibration import CalibratedClassifierCV as cccv
 
 def main(args, generation_args):
     # load hidden states and labels
-    name = f"{generation_args.dataset_name}_on_{args.calibration_dataset_name}_{args.calibration_type}.png"
+    name = f"{generation_args.dataset_name}_on_{args.calibration_dataset_name}_{args.calibration_type}"
+    if args.use_dropout:
+        name += "_dropout.png"
+    else:
+        name += ".png"
     neg_hs, pos_hs, y = load_all_generations(generation_args)
 
     if args.calibration_dataset_name is not None:
@@ -47,20 +52,28 @@ def main(args, generation_args):
     print("Logistic regression accuracy: {}".format(lr.score(x_test, y_test)))
 
     # Set up CCS. Note that you can usually just use the default args by simply doing ccs = CCS(neg_hs, pos_hs, y)
+    print(args.linear)
     ccs = CCS(neg_hs_train, pos_hs_train, nepochs=args.nepochs, ntries=args.ntries, lr=args.lr, batch_size=args.ccs_batch_size,
                     verbose=args.verbose, device=args.ccs_device, linear=args.linear, weight_decay=args.weight_decay,
-                    var_normalize=args.var_normalize)
+                    var_normalize=args.var_normalize, use_dropout=args.use_dropout, use_dropout_loss=args.use_dropout_loss,
+                    dropout_loss_weight=args.dropout_loss_weight, dropout_factor=args.dropout_factor)
 
     fitted_ccs = ccs.fit(None, None)
     #ccs.repeated_train()
 
     ccs_acc, y_preds_pos, y_preds_neg = ccs.get_acc(neg_hs_test, pos_hs_test, y_test, return_conf=True)
     uncali_x, uncali_y = calibration_curve(y_test, y_preds_pos.flatten(), n_bins=10)
-    if uncali_x[0] > uncali_y[-1] or uncali_y[0] > uncali_y[-1]:
+    if (uncali_x[0] < uncali_x[-1] and uncali_y[0] > uncali_y[-1]) or (uncali_x[0] > uncali_x[-1] and uncali_y[0] < uncali_y[-1]):
         print('Flipping uncalibrated graph')
-        uncali_x, uncali_y = calibration_curve(y_test, y_preds_neg.flatten(), n_bins=10)
+        #uncali_x = uncali_x[::-1]
+        uncali_y = uncali_y[::-1]
+        temp = y_preds_pos
+        y_preds_pos = y_preds_neg
+        y_preds_neg = temp
+        #uncali_x, uncali_y = calibration_curve(y_test, y_preds_neg.flatten(), n_bins=10)
     # Assume that the first point should be less than the last point when plotting
     print(f"CCS uncalibrated accuracy: {ccs_acc}")
+    print(f"Brier score: {brier_score_loss(y_test, y_preds_pos.flatten())}")
 
     X = np.stack([cali_pos_hs_train, cali_neg_hs_train], axis=0).transpose(1, 0, 2)
     y = cali_y_train
@@ -70,9 +83,14 @@ def main(args, generation_args):
         calibrated_ccs = fitted_ccs.fit(X, y)
         ccs_acc, y_preds_pos, y_preds_neg = calibrated_ccs.get_acc(neg_hs_test, pos_hs_test, y_test, return_conf=True)
         cali_x, cali_y = calibration_curve(y_test, y_preds_pos.flatten(), n_bins=10)
-        if cali_x[0] > cali_x[-1] or cali_y[0] > cali_y[-1]:
+        if (cali_x[0] < cali_x[-1] and cali_y[0] > cali_y[-1]) or (cali_x[0] > cali_x[-1] and cali_y[0] < cali_y[-1]):
             print('Flipping calibrated graph')
-            cali_x, cali_y = calibration_curve(y_test, y_preds_neg.flatten(), n_bins=10)
+            #cali_x = cali_x[::-1]
+            cali_y = cali_y[::-1]
+            temp = y_preds_pos
+            y_preds_pos = y_preds_neg
+            y_preds_neg = temp
+            #cali_x, cali_y = calibration_curve(y_test, y_preds_neg.flatten(), n_bins=10)
 
     # Calibration with sklearn
     elif args.calibration_type in ['sigmoid', 'isotonic']:
@@ -80,14 +98,21 @@ def main(args, generation_args):
         calibrated_ccs.fit(X, y)
         X = np.stack([pos_hs_test, neg_hs_test], axis=0).transpose(1, 0, 2)
         y_preds = calibrated_ccs.predict_proba(X)
+        y_preds_pos = y_preds[:,1]
+        y_preds_neg = y_preds[:,0]
         predictions = (y_preds[:,1] < 0.5).astype(int)
         acc = (predictions == y_test).mean()
         ccs_acc = max(acc, 1 - acc)
         cali_x, cali_y = calibration_curve(y_test, y_preds[:,1].flatten(), n_bins=10)
-        if cali_x[0] > cali_x[-1] or cali_y[0] > cali_y[-1]:
+        if (cali_x[0] < cali_x[-1] and cali_y[0] > cali_y[-1]) or (cali_x[0] > cali_x[-1] and cali_y[0] < cali_y[-1]):
             print('Flipping calibrated graph')
-            cali_x, cali_y = calibration_curve(y_test, y_preds[:,0].flatten(), n_bins=10)
+            cali_y = cali_y[::-1]
+            temp = y_preds_pos
+            y_preds_pos = y_preds_neg
+            y_preds_neg = temp
+            #cali_x, cali_y = calibration_curve(y_test, y_preds[:,0].flatten(), n_bins=10)
     print(f"CCS calibrated accuracy: {ccs_acc}")
+    print(f"Brier score: {brier_score_loss(y_test, y_preds_pos.flatten())}")
 
 
     plt.plot([0, 1], [0, 1], linestyle = '--', label = 'Ideally Calibrated')
@@ -112,10 +137,17 @@ if __name__ == "__main__":
     parser.add_argument("--ccs_batch_size", type=int, default=-1)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--ccs_device", type=str, default="cuda")
-    parser.add_argument("--linear", action="store_true")
+    parser.add_argument("--linear", type=bool, default=True)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--var_normalize", action="store_true")
-    parser.add_argument("--calibration_type", type=str, default="bce")
+
+    # Actively modulate these variables
+    parser.add_argument("--calibration_type", type=str, default="sigmoid")
+    parser.add_argument("--use_dropout", type=bool, default=True)
+    parser.add_argument("--use_dropout_loss", type=bool, default=True)
+    parser.add_argument("--dropout_loss_weight", type=float, default=1.0)
+    parser.add_argument("--dropout_factor", type=float, default=0.1)
+
     args = parser.parse_args()
     args.calibration_dataset_name = cdn
     main(args, generation_args)

@@ -3,7 +3,7 @@ from utils import get_parser, load_model, get_dataloader, get_all_hidden_states,
 def main(args):
     # Set up the model and data
     print("Loading model")
-    model, tokenizer, model_type = load_model(args.model_name, args.cache_dir, args.parallelize, args.device)
+    model, tokenizer, model_type = load_model(args.model_name, args.cache_dir, args.parallelize, args.device, args.random_init)
 
     print("Loading dataloader")
     dataloader = get_dataloader(args.dataset_name, args.split, tokenizer, args.prompt_idx, batch_size=args.batch_size, 
