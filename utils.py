@@ -40,7 +40,7 @@ model_mapping = {
 }
 
 
-def get_parser():
+def get_parser(evaluate=False):
     """
     Returns the parser we will use for generate.py and evaluate.py
     (We include it here so that we can use the same parser for both scripts)
@@ -68,6 +68,12 @@ def get_parser():
     parser.add_argument("--random_init", action="store_true", help="Whether to use random weights for model init rather than pretrained weights")
     parser.add_argument("--use_more_ratings", action="store_true", help="When using the Yelp dataset, use additional 2 and 4 star ratings")
 
+    if evaluate:
+        parser.add_argument("--calibration_type", type=str, default="sigmoid")
+        parser.add_argument("--use_dropout", type=bool, default=False)
+        parser.add_argument("--use_dropout_loss", type=bool, default=False)
+        parser.add_argument("--dropout_loss_weight", type=float, default=1.0)
+        parser.add_argument("--dropout_factor", type=float, default=0.2)
     return parser
 
 
@@ -690,12 +696,15 @@ class CCS(sklearn.base.BaseEstimator):
                         with torch.no_grad():
                             if self.linear:
                                 p0, p1 = self.probe(self.dropout(x0_batch)), self.probe(self.dropout(x1_batch))
+                                #print(p0.shape)
                             else:
                                 p0, p1 = self.probe(x0_batch, apply_dropout=True), self.probe(x1_batch, apply_dropout=True)
+                               # print(p0.shape)
 
                             p_0_running.append(p0)
                             p_1_running.append(p1)
                     avg_var = (torch.var(torch.stack(p_0_running, dim=0)) + torch.var(torch.stack(p_1_running, dim=0))) / 2
+                    #avg_var = (torch.mean(torch.var(torch.cat(p_0_running, dim=1), dim=1)) + torch.mean(torch.var(torch.cat(p_1_running, dim=1), dim=1))) / 2
 
                             # Want to penalize high variance across samples, which equates to 
                         
