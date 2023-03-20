@@ -24,6 +24,8 @@ def main(args, generation_args):
 
     # Make sure the shape is correct
     assert neg_hs.shape == pos_hs.shape
+    print(neg_hs.shape)
+    print(pos_hs.shape)
     neg_hs, pos_hs = neg_hs[..., -1], pos_hs[..., -1]  # take the last layer
     if neg_hs.shape[1] == 1:  # T5 may have an extra dimension; if so, get rid of it
         neg_hs = neg_hs.squeeze(1)
@@ -53,7 +55,9 @@ def main(args, generation_args):
 
     fitted_ccs = ccs.fit(None, None)
     #ccs.repeated_train()
-
+    print(neg_hs_test)
+    print(pos_hs_test)
+    print(y_test)
     ccs_acc, y_preds_pos, y_preds_neg = ccs.get_acc(neg_hs_test, pos_hs_test, y_test, return_conf=True)
     uncali_x, uncali_y = calibration_curve(y_test, y_preds_pos.flatten(), n_bins=10)
     if uncali_x[0] > uncali_y[-1] or uncali_y[0] > uncali_y[-1]:
@@ -118,7 +122,7 @@ if __name__ == "__main__":
     parser.add_argument("--linear", type=bool, default=True)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--var_normalize", action="store_true")
-    parser.add_argument("--calibration_type", type=str, default="isotonic")
+    parser.add_argument("--calibration_type", type=str, default="sigmoid")
     args = parser.parse_args()
     args.calibration_dataset_name = cdn
     main(args, generation_args)

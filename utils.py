@@ -131,6 +131,8 @@ def load_single_generation(args, generation_type="hidden_states"):
     arg_dict = vars(args)
     exclude_keys = ["save_dir", "cache_dir", "device"]
     filename = generation_type + "__" + "__".join(['{}_{}'.format(k, v) for k, v in arg_dict.items() if k not in exclude_keys]) + ".npy".format(generation_type)
+    #if generation_type=="labels":
+        #print(filename)
     return np.load(os.path.join(args.save_dir, filename))
 
 
@@ -139,7 +141,7 @@ def load_all_generations(args):
     neg_hs = load_single_generation(args, generation_type="negative_hidden_states")
     pos_hs = load_single_generation(args, generation_type="positive_hidden_states")
     labels = load_single_generation(args, generation_type="labels")
-
+    print(labels)
     return neg_hs, pos_hs, labels
 
 
@@ -254,8 +256,16 @@ class ContrastDataset(Dataset):
         if self.dataset_name == "boolq_tough":
             neg_prompt = data["Option 0"]
             pos_prompt = data["Option 1"]
+            #print(neg_prompt)
+            #print(len(neg_prompt))
             neg_ids = self.tokenizer(neg_prompt, truncation=True, padding="max_length", return_tensors="pt")
+            if neg_ids["input_ids"].shape[0] == 1:
+                for k in neg_ids:
+                    neg_ids[k] = neg_ids[k].squeeze(0)
             pos_ids = self.tokenizer(pos_prompt, truncation=True, padding="max_length", return_tensors="pt")
+            if pos_ids["input_ids"].shape[0] == 1:
+                for k in pos_ids:
+                    pos_ids[k] = pos_ids[k].squeeze(0)
             #neg_ids, pos_ids = self.encode(neg_prompt), self.encode(pos_prompt)
             true_answer = data["Correct answer"]
             return neg_ids, pos_ids, neg_prompt, pos_prompt, true_answer
@@ -329,7 +339,7 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
             all_prompts = DatasetTemplates('imdb')
     else:
         data_files = {"train": "wrong_zero_shot_boolq.csv"}
-        raw_dataset = load_dataset('csv', data_files=data_files)["train"]
+        raw_dataset = load_dataset('csv', data_files=data_files, column_names=['Option 0', 'Option 1', 'Predicted', 'Correct answer'], skiprows=1)["train"]
         all_prompts = DatasetTemplates('imdb')
     # create the ConstrastDataset
     contrast_dataset = ContrastDataset(raw_dataset, tokenizer, all_prompts, prompt_idx,
@@ -354,7 +364,33 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
         # create and return the corresponding dataloader
         subset_dataset = torch.utils.data.Subset(contrast_dataset, keep_idxs)
     else:
-        keep_idxs = list(range(0,1000))
+        #idxs = list(range(0,2000))
+        idxs = np.random.permutation(len(contrast_dataset))
+        #keep_idxs_r = []
+        #keep_idxs_w = []
+        keep_idxs = []
+        right = 0
+        wrong = 0
+        #print(raw_dataset[0])
+        for idx in idxs:
+            input_text = raw_dataset[int(idx)]["Option 0"]
+            #print(raw_dataset[idx])
+            if len(tokenizer.encode(input_text, truncation=False)) < tokenizer.model_max_length - 2 and raw_dataset[int(idx)]['Predicted'] == raw_dataset[int(idx)]['Correct answer']: #and right < num_examples/2:
+                #keep_idxs_r.append(idx)
+                keep_idxs.append(idx)
+                #if len(keep_idxs_r) + len(keep_idxs_w) >= num_examples:
+                if len(keep_idxs) >= num_examples:
+                    break
+            elif len(tokenizer.encode(input_text, truncation=False)) < tokenizer.model_max_length - 2: #and wrong < num_examples/2:
+                if not raw_dataset[int(idx)]['Predicted'] == raw_dataset[int(idx)]['Correct answer']:
+                    #keep_idxs_w.append(idx)
+                    keep_idxs.append(idx)
+                    #wrong += 1
+                    #if len(keep_idxs_r) + len(keep_idxs_w) >= num_examples:
+                    if len(keep_idxs) >= num_examples:
+                        break
+            #print(raw_dataset[idx]["Correct answer"])
+        #keep_idxs = keep_idxs_r + keep_idxs_w
         subset_dataset = torch.utils.data.Subset(contrast_dataset, keep_idxs)
     dataloader = DataLoader(subset_dataset, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=num_workers)
 
@@ -393,7 +429,13 @@ def get_individual_hidden_states(model, batch_ids, layer=None, all_layers=True, 
 
     # forward pass
     with torch.no_grad():
+        #print(batch_ids)
         batch_ids = batch_ids.to(model.device)
+        #print(batch_ids)
+        print(batch_ids['input_ids'].shape)
+        print(batch_ids['token_type_ids'].shape)
+        print(batch_ids['attention_mask'].shape)
+        #print(batch_ids.shape)
         output = model(**batch_ids, output_hidden_states=True)
 
     # get all the corresponding hidden states (which is a tuple of length num_layers)
