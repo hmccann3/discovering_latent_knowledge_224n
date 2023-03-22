@@ -8,7 +8,7 @@ def main(args):
     print("Loading dataloader")
     dataloader = get_dataloader(args.dataset_name, args.split, tokenizer, args.prompt_idx, batch_size=args.batch_size, 
                                 num_examples=args.num_examples, model_type=model_type, use_decoder=args.use_decoder, device=args.device,
-                                more_ratings=args.use_more_ratings)
+                                )#more_ratings=args.use_more_ratings)
 
     # Get the hidden states and labels
     print("Generating hidden states")

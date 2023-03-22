@@ -74,6 +74,9 @@ def get_parser(evaluate=False):
         parser.add_argument("--use_dropout_loss", type=bool, default=False)
         parser.add_argument("--dropout_loss_weight", type=float, default=1.0)
         parser.add_argument("--dropout_factor", type=float, default=0.2)
+        parser.add_argument("--confidence_loss_scale", type=float, default=1.0)
+        parser.add_argument("--eval_dataset_name", type=str, default=None)
+        parser.add_argument("--eval_prompt_idx", type=int, default=0)
     return parser
 
 
@@ -147,14 +150,23 @@ def save_generations(generation, args, generation_type):
 
 def load_single_generation(args, generation_type="hidden_states"):
     # use the same filename as in save_generations
-    arg_dict = vars(args)
+    arg_dict = vars(args) 
+    arg_dict_copy = arg_dict.copy()
     exclude_keys = ["save_dir", "cache_dir", "device"]
-    filename = generation_type + "__" + "__".join(['{}_{}'.format(k, v) for k, v in arg_dict.items() if k not in exclude_keys]) + ".npy".format(generation_type)
+    if args.dataset_name == 'boolq':
+        exclude_keys.append('use_more_ratings')
+        arg_dict_copy['split'] = 'validation'
+        arg_dict_copy['prompt_idx'] = 8
+    else:
+        arg_dict_copy['split'] = 'test'
+
+    filename = generation_type + "__" + "__".join(['{}_{}'.format(k, v) for k, v in arg_dict_copy.items() if k not in exclude_keys]) + ".npy".format(generation_type)
     return np.load(os.path.join(args.save_dir, filename))
 
 
 def load_all_generations(args):
     # load all the saved generations: neg_hs, pos_hs, and labels
+    print(args)
     neg_hs = load_single_generation(args, generation_type="negative_hidden_states")
     pos_hs = load_single_generation(args, generation_type="positive_hidden_states")
     labels = load_single_generation(args, generation_type="labels")
@@ -189,12 +201,12 @@ class ContrastDataset(Dataset):
 
         # prompt
         self.prompt_checking = True # determines whether you should apply prompt checking before truncation
-        if dataset_name in ['boolq', 'dbpedia_14']:
-            self.prompt_checking = False
+        #if dataset_name in ['boolq', 'dbpedia_14']:
+        #    self.prompt_checking = False
 
-        if dataset_name not in ['boolq']:
-            prompt_name_list = list(all_prompts.name_to_id_mapping.keys())
-            self.prompt = all_prompts[prompt_name_list[prompt_idx]]
+        #if dataset_name not in ['boolq']:
+        prompt_name_list = list(all_prompts.name_to_id_mapping.keys())
+        self.prompt = all_prompts[prompt_name_list[prompt_idx]]
 
     def __len__(self):
         return len(self.raw_dataset)
@@ -317,16 +329,28 @@ class ContrastDataset(Dataset):
             pos_prompt = [prompt, "choice 2"] 
 
         elif self.dataset_name in ['boolq']:
+            #passage, question, answer = data["passage"], data["question"], data["answer"]
+
+            #prompt = f"Given the following passage - {passage} - {question}?"
+            #neg_prompt = [prompt, "false"]
+            #pos_prompt = [prompt, "true"]
+
+            #if answer:
+            #    true_answer = 1
+            #else:
+            #    true_answer = 0
+
             passage, question, answer = data["passage"], data["question"], data["answer"]
+            label_list = self.prompt.get_answer_choices_list(data)
+            neg_example = {"passage": passage, "question": question, "label": 0}
+            pos_example = {"passage": passage, "question": question, "label": 1}
 
-            prompt = f"Given the following passage - {passage} - {question}?"
-            neg_prompt = [prompt, "false"]
-            pos_prompt = [prompt, "true"]
+            neg_prompt, pos_prompt = self.prompt.apply(neg_example), self.prompt.apply(pos_example)
+            #print(neg_prompt)
+            #print(pos_prompt)
 
-            if answer:
-                true_answer = 1
-            else:
-                true_answer = 0
+            true_answer = int(answer)
+
 
         # For binary-class classification
         elif self.dataset_name in ['imdb', 'yelp_review_full']:
@@ -401,7 +425,10 @@ def get_dataloader(dataset_name, split, tokenizer, prompt_idx, batch_size=16, nu
         raw_dataset = Dataset.from_pandas(new_df)
 
     # load all the prompts for that dataset
-    all_prompts = DatasetTemplates(dataset_name)
+    if dataset_name == 'boolq':
+        all_prompts = DatasetTemplates('super_glue/boolq')
+    else:
+        all_prompts = DatasetTemplates(dataset_name)
     print(all_prompts)
 
     if dataset_name == "yelp_review_full":
@@ -579,7 +606,8 @@ class MLPProbe(nn.Module):
 class CCS(sklearn.base.BaseEstimator):
     def __init__(self, x0, x1, nepochs=1000, ntries=10, lr=1e-3, batch_size=-1,
                  verbose=False, device="cuda", linear=True, weight_decay=0.01, var_normalize=False,
-                 use_dropout=False, use_dropout_loss=False, dropout_loss_weight=0.2, dropout_factor=0.1):
+                 use_dropout=False, use_dropout_loss=False, dropout_loss_weight=0.2, dropout_factor=0.1,
+                 confidence_loss_scale=1):
         # data
         self.var_normalize = var_normalize
         self.x0 = x0
@@ -597,6 +625,7 @@ class CCS(sklearn.base.BaseEstimator):
         self.use_dropout_loss = use_dropout_loss
         self.dropout_loss_weight = dropout_loss_weight
         self.dropout_factor = dropout_factor
+        self.confidence_loss_scale = confidence_loss_scale
 
         # probe
         self.linear = linear
@@ -606,12 +635,12 @@ class CCS(sklearn.base.BaseEstimator):
 
     def initialize_probe(self):
         if self.linear:
-            print("Linear probe")
+            #print("Linear probe")
             if self.use_dropout or self.use_dropout_loss:
                 self.dropout = nn.Dropout(self.dropout_factor)
             self.probe = nn.Sequential(nn.Linear(self.d, 1), nn.Sigmoid())
         else:
-            print("MLP probe")
+            #print("MLP probe")
             self.probe = MLPProbe(self.d, self.use_dropout, self.use_dropout_loss, self.dropout_factor)
         self.probe.to(self.device)
 
@@ -641,7 +670,7 @@ class CCS(sklearn.base.BaseEstimator):
         """
         Returns the CCS loss for two probabilities each of shape (n,1) or (n,)
         """
-        informative_loss = (torch.min(p0, p1)**2).mean(0)
+        informative_loss = self.confidence_loss_scale * (torch.min(p0, p1)**2).mean(0)
         consistent_loss = ((p0 - (1-p1))**2).mean(0)
         return informative_loss + consistent_loss
 
@@ -703,8 +732,8 @@ class CCS(sklearn.base.BaseEstimator):
 
                             p_0_running.append(p0)
                             p_1_running.append(p1)
-                    avg_var = (torch.var(torch.stack(p_0_running, dim=0)) + torch.var(torch.stack(p_1_running, dim=0))) / 2
-                    #avg_var = (torch.mean(torch.var(torch.cat(p_0_running, dim=1), dim=1)) + torch.mean(torch.var(torch.cat(p_1_running, dim=1), dim=1))) / 2
+                    #avg_var = (torch.var(torch.stack(p_0_running, dim=0)) + torch.var(torch.stack(p_1_running, dim=0))) / 2
+                    avg_var = (torch.mean(torch.var(torch.cat(p_0_running, dim=1), dim=1)) + torch.mean(torch.var(torch.cat(p_1_running, dim=1), dim=1))) / 2
 
                             # Want to penalize high variance across samples, which equates to 
                         
@@ -739,7 +768,9 @@ class CCS(sklearn.base.BaseEstimator):
 
         best_loss = np.inf
         for train_num in range(self.ntries):
-            #self.initialize_probe()
+            #if not self.use_dropout and not self.use_dropout_loss:
+            #    self.initialize_probe()
+            self.initialize_probe()
             loss = self.train()
             if loss < best_loss:
                 self.best_probe = copy.deepcopy(self.probe)
@@ -813,7 +844,9 @@ class CCS(sklearn.base.BaseEstimator):
 
         best_loss = np.inf
         for train_num in range(self.ntries):
-            #self.initialize_probe()
+            #if not self.use_dropout and not self.use_dropout_loss:
+            #    self.initialize_probe()
+            self.initialize_probe()
             loss = self._calibrated_train(X, y)
             if loss < best_loss:
                 self.best_probe = copy.deepcopy(self.probe)
@@ -835,7 +868,7 @@ class CCS(sklearn.base.BaseEstimator):
             x0_batch = x0[j*batch_size:(j+1)*batch_size]
             x1_batch = x1[j*batch_size:(j+1)*batch_size]
 
-            p0, p1 = self.probe(x0_batch), self.probe(x1_batch)
+            p0, p1 = self.best_probe(x0_batch), self.best_probe(x1_batch)
             # TODO: to actually predict, we need to know the y value, so
             # we need to hack it in somehow
             avg_pos_confidence = 0.5*(p0 + (1-p1))
